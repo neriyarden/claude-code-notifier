@@ -36,24 +36,42 @@ jobs:
           else
             echo "is_new=false" >> $GITHUB_OUTPUT
           fi
+          
+          - name: Summarize with GitHub Models
+          id: summary
+          if: steps.check.outputs.is_new == 'true'    
+          env:         
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            RELEASE_BODY: ${{ steps.release.outputs.body }}
+          run: |
+            SUMMARY=$(python3 - <<'PYEOF'
+            import json, os, urllib.request
 
-      - name: Summarize with GitHub Models
-        id: summary
-        if: steps.check.outputs.is_new == 'true'
-        run: |
-          SUMMARY=$(curl -s https://models.inference.ai.azure.com/chat/completions \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d '{
+            body = os.environ["RELEASE_BODY"]
+            payload = {
               "model": "gpt-4o-mini",
               "messages": [{
                 "role": "user",
-                "content": "Summarize this Claude Code release. Focus ONLY on new features and user-facing changes. Skip bug fixes and internal changes. Be concise, use bullet points. Start with a one-line headline.\n\nRelease notes:\n${{ steps.release.outputs.body }}"
+                "content": f"Summarize this Claude Code release. Focus ONLY on new features and user-facing changes. Skip bug fixes and internal changes. Be concise, use bullet points. Start with a one-line headline.\n\nRelease notes:\n{body}"
               }]
-            }' | jq -r '.choices[0].message.content')
-          echo "summary<<EOF" >> $GITHUB_OUTPUT
-          echo "$SUMMARY" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+            }
+
+            req = urllib.request.Request(
+              "https://models.inference.ai.azure.com/chat/completions",
+              data=json.dumps(payload).encode(),
+              headers={
+                "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+                "Content-Type": "application/json"
+              }
+            )
+            with urllib.request.urlopen(req) as resp:
+              result = json.loads(resp.read())
+              print(result["choices"][0]["message"]["content"])
+            PYEOF
+            )
+            echo "summary<<EOF" >> $GITHUB_OUTPUT
+            echo "$SUMMARY" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Send email
         if: steps.check.outputs.is_new == 'true'
