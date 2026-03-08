@@ -81,20 +81,54 @@ jobs:
           RELEASE_SUMMARY: ${{ steps.summary.outputs.summary }}
         run: |
           python3 - <<'PYEOF'
-          import smtplib, os
+          import smtplib, os, re
           from email.mime.text import MIMEText
           from email.mime.multipart import MIMEMultipart
 
           tag = os.environ["RELEASE_TAG"]
           summary = os.environ["RELEASE_SUMMARY"]
 
+          def md_to_html(text):
+              text = re.sub(r'^### (.+)$', r'<h3>\1</h3>', text, flags=re.MULTILINE)
+              text = re.sub(r'^## (.+)$', r'<h2>\1</h2>', text, flags=re.MULTILINE)
+              text = re.sub(r'^# (.+)$', r'<h1>\1</h1>', text, flags=re.MULTILINE)
+              text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+              text = re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
+              text = re.sub(r'`(.+?)`', r'<code>\1</code>', text)
+              lines = text.split('\n')
+              result, in_list = [], False
+              for line in lines:
+                  if re.match(r'^- ', line):
+                      if not in_list:
+                          result.append('<ul>')
+                          in_list = True
+                      result.append(f'<li>{line[2:]}</li>')
+                  else:
+                      if in_list:
+                          result.append('</ul>')
+                          in_list = False
+                      if line.strip() and not line.startswith('<h'):
+                          result.append(f'<p>{line}</p>')
+                      else:
+                          result.append(line)
+              if in_list:
+                  result.append('</ul>')
+              return '\n'.join(result)
+
+          html = f"""
+          <html><body style="font-family: sans-serif; max-width: 600px; margin: auto; padding: 20px;">
+            <h2>Claude Code {tag}</h2>
+            {md_to_html(summary)}
+            <hr>
+            <a href="https://github.com/anthropics/claude-code/releases/tag/{tag}">Full release notes</a>
+          </body></html>
+          """
+
           msg = MIMEMultipart("alternative")
           msg["Subject"] = f"Claude Code {tag} released"
           msg["From"] = "neriyarden@gmail.com"
           msg["To"] = "neriyarden@gmail.com"
-
-          body = f"Claude Code {tag} is out.\n\n{summary}\n\nFull release: https://github.com/anthropics/claude-code/releases/tag/{tag}"
-          msg.attach(MIMEText(body, "plain"))
+          msg.attach(MIMEText(html, "html"))
 
           with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
               server.login("neriyarden@gmail.com", os.environ["GMAIL_APP_PASSWORD"])
