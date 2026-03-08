@@ -1,0 +1,98 @@
+name: Claude Code Release Notifier
+
+on:
+  schedule:
+    - cron: '0 9 * * *'  # 9am UTC daily
+  workflow_dispatch:       # manual trigger for testing
+
+jobs:
+  check-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      models: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get latest release
+        id: release
+        run: |
+          RESPONSE=$(curl -s https://api.github.com/repos/anthropics/claude-code/releases/latest)
+          TAG=$(echo "$RESPONSE" | jq -r '.tag_name')
+          BODY=$(echo "$RESPONSE" | jq -r '.body')
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          echo "$BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Check if new release
+        id: check
+        run: |
+          LAST_TAG=$(cat last_tag.txt 2>/dev/null || echo "none")
+          echo "last_tag=$LAST_TAG" >> $GITHUB_OUTPUT
+          if [ "$LAST_TAG" != "${{ steps.release.outputs.tag }}" ]; then
+            echo "is_new=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_new=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Summarize with GitHub Models
+        id: summary
+        if: steps.check.outputs.is_new == 'true'
+        run: |
+          SUMMARY=$(curl -s https://models.inference.ai.azure.com/chat/completions \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "model": "gpt-4o-mini",
+              "messages": [{
+                "role": "user",
+                "content": "Summarize this Claude Code release. Focus ONLY on new features and user-facing changes. Skip bug fixes and internal changes. Be concise, use bullet points. Start with a one-line headline.\n\nRelease notes:\n${{ steps.release.outputs.body }}"
+              }]
+            }' | jq -r '.choices[0].message.content')
+          echo "summary<<EOF" >> $GITHUB_OUTPUT
+          echo "$SUMMARY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Send email
+        if: steps.check.outputs.is_new == 'true'
+        run: |
+          python3 - <<'PYEOF'
+          import smtplib
+          import os
+          from email.mime.text import MIMEText
+          from email.mime.multipart import MIMEMultipart
+
+          tag = "${{ steps.release.outputs.tag }}"
+          summary = """${{ steps.summary.outputs.summary }}"""
+
+          msg = MIMEMultipart("alternative")
+          msg["Subject"] = f"Claude Code {tag} released"
+          msg["From"] = "neriyarden@gmail.com"
+          msg["To"] = "neriyarden@gmail.com"
+
+          body = f"""Claude Code {tag} is out.
+
+          {summary}
+
+          Full release: https://github.com/anthropics/claude-code/releases/tag/{tag}
+          """
+          msg.attach(MIMEText(body, "plain"))
+
+          with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+              server.login("neriyarden@gmail.com", os.environ["GMAIL_APP_PASSWORD"])
+              server.sendmail("neriyarden@gmail.com", "neriyarden@gmail.com", msg.as_string())
+          PYEOF
+        env:
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+
+      - name: Update last tag
+        if: steps.check.outputs.is_new == 'true'
+        run: |
+          echo "${{ steps.release.outputs.tag }}" > last_tag.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add last_tag.txt
+          git commit -m "chore: update last seen tag to ${{ steps.release.outputs.tag }}"
+          git push
